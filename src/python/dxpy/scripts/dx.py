@@ -1777,9 +1777,32 @@ def get_app(entity_result, args):
 
 def get(args):
     # Decide what to do based on entity's class
-    project, _folderpath, entity_result = try_call(resolve_existing_path,
-                                                   args.path,
-                                                   expected='entity')
+    print('hello')
+    try:
+        print('hello')
+        project, _folderpath, entity_result = resolve_existing_path(args.path,
+                                                                    expected='entity')
+    except ResolutionError as details:
+        print('hello')
+        # PermissionDenied or InvalidAuthentication
+        if str(details).endswith('code 401'):
+            # Surface permissions-related errors here (for data
+            # objects, jobs, and analyses). Other types of errors
+            # may be recoverable below.
+            #
+            # TODO: better way of obtaining the response code when
+            # the exception corresponds to an API error
+            raise DXCLIError(str(details))
+        project, entity_result = None, None
+
+    if not is_hashid(args.path) and ':' not in args.path:
+        if args.path.startswith('app-'):
+            desc = dxpy.api.app_describe(args.path)
+            entity_result = {"id": desc["id"], "describe": desc}
+        else:
+            result = dxpy.find_apps(name=args.path, describe=True)
+            entity_result = result.next()
+
 
     if entity_result is None:
         parser.exit(3,
