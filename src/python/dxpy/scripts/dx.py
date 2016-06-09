@@ -2665,7 +2665,11 @@ def run_one(args, executable, dest_proj, dest_path, preset_inputs=None, input_na
                 print('-------')
                 watch(watch_args)
             elif args.ssh:
-                ssh_args = parser.parse_args(['ssh', dxexecution.get_id()])
+                if args.ssh_proxy:
+                    ssh_args = parser.parse_args(
+                        ['ssh', '--ssh-proxy', args.ssh_proxy[0], args.ssh_proxy[1], dxexecution.get_id()])
+                else:
+                    ssh_args = parser.parse_args(['ssh', dxexecution.get_id()])
                 ssh(ssh_args, ssh_config_verified=True)
     except Exception:
         err_exit()
@@ -2812,6 +2816,8 @@ def run(args):
         args.allow_ssh = [i for i in args.allow_ssh if i is not None]
     if args.allow_ssh == [] or ((args.ssh or args.debug_on) and not args.allow_ssh):
         args.allow_ssh = ['*']
+    if args.ssh_proxy and not args.ssh:
+        err_exit(exception=DXCLIError("Options --ssh-proxy cannot be specified without --ssh"))
     if args.ssh or args.allow_ssh or args.debug_on:
         verify_ssh_config()
 
@@ -3237,11 +3243,12 @@ def ssh(args, ssh_config_verified=False):
 
     import socket
     connected = False
-    sys.stdout.write("Checking connectivity to {}...".format(host))
+    sys.stdout.write("Checking connectivity to {}...".format(host if not args.ssh_proxy else args.ssh_proxy[0]))
     sys.stdout.flush()
     for i in range(12):
         try:
-            socket.create_connection((host, 22), timeout=5)
+            socket.create_connection((host if not args.ssh_proxy else args.ssh_proxy[0],
+                                      22 if not args.ssh_proxy else args.ssh_proxy[1]), timeout=5)
             connected = True
             break
         except Exception:
@@ -3252,15 +3259,17 @@ def ssh(args, ssh_config_verified=False):
         sys.stdout.write(GREEN("OK") + "\n")
     else:
         msg = "Failed to connect to {h}. Please check your connectivity and try {cmd} again."
-        err_exit(msg.format(h=host, cmd=BOLD("dx ssh {}".format(args.job_id))),
+        err_exit(msg.format(h=host if not args.ssh_proxy else args.ssh_proxy[0], cmd=BOLD("dx ssh {}".format(args.job_id))),
                  exception=DXCLIError())
 
     print("Connecting to", host)
     ssh_args = ['ssh', '-i', os.path.expanduser('~/.dnanexus_config/ssh_id'),
                 '-o', 'HostKeyAlias={}.dnanex.us'.format(args.job_id),
-                '-o', 'UserKnownHostsFile={}'.format(known_hosts_file),
-                '-l', 'dnanexus', host]
-    ssh_args += args.ssh_args
+                '-o', 'UserKnownHostsFile={}'.format(known_hosts_file)]
+    if args.ssh_proxy:
+        ssh_args += ['-o', '"ProxyCommand nc -X connect -x {proxy_addr}:{proxy_port} %h %p"'.
+            format(proxy_addr=args.ssh_proxy[0], proxy_port=args.ssh_proxy[1])]
+    ssh_args += ['-l', 'dnanexus', host, args.ssh_args]
     exit_code = subprocess.call(ssh_args)
     try:
         job_desc = dxpy.describe(args.job_id)
@@ -4152,6 +4161,8 @@ parser_run.add_argument('--ssh',
                                   "sets --priority high",
                                   width_adjustment=-24),
                         action='store_true')
+parser_run.add_argument('--ssh-proxy', help='SSH connect via proxy, please supply proxy address and port', nargs=2,
+                        metavar=('<address>', '<port>'))
 parser_run.add_argument('--debug-on', action='append', choices=['AppError', 'AppInternalError', 'ExecutionError', 'All'],
                         help=fill("Configure the job to hold for debugging when any of the listed errors occur",
                                   width_adjustment=-24))
@@ -4207,6 +4218,8 @@ parser_ssh = subparsers.add_parser('ssh', help='Connect to a running job via SSH
                                    parents=[env_args])
 parser_ssh.add_argument('job_id', help='Name of job to connect to')
 parser_ssh.add_argument('ssh_args', help='Command-line arguments to pass to the SSH client', nargs=argparse.REMAINDER)
+parser_ssh.add_argument('--ssh-proxy', help='Connect via proxy, please supply proxy address and port',
+                        nargs=2, metavar=('<address>', '<port>'))
 parser_ssh.set_defaults(func=ssh)
 register_parser(parser_ssh, categories='exec')
 
