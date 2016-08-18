@@ -1,8 +1,13 @@
 #!/usr/bin/env python
+#TODO: check for self.project
+'''
+All folders in root represent projects. If more then one project exist with same name,
+then suffix ".<project_id>" will be added.
+'''
 
 from __future__ import print_function
 
-import os, sys
+import os, sys, re
 
 # Try to reset encoding to utf-8
 # Note: This is incompatible with pypy
@@ -28,12 +33,22 @@ dxpy.USER_AGENT += " dxfs"
 if not hasattr(__builtins__, 'bytes'):
     bytes = str
 
+
 def _get_size(obj):
     if obj["class"] == "gtable":
         # HACK to get gtables to sort of work for now. TODO: Add enough bytes to account for all the tabs and newlines in the tsv output.
         return obj.get('size', 0) * 2
     else:
         return obj.get('size', 0)
+
+
+class Project:
+
+    def __init__(self, project=None, description=None, mtime=None):
+        self.project = project
+        self.description = description
+        self.mtime = mtime
+
 
 class DXInode(object):
     DIR  = 'dir'
@@ -75,7 +90,7 @@ class DXInode(object):
     @property
     def handler(self):
         if self._handler is None and self.dxid is not None:
-            self._handler = dxpy.get_handler(self.dxid)
+            self._handler = dxpy.get_handler(self.dxid, project=self.describe['project'])
         return self._handler
 
     @handler.setter
@@ -167,16 +182,17 @@ class DXInode(object):
 
 
 class DXFS(LoggingMixIn, Operations):
-    def __init__(self, project_id, refresh_interval=5):
+    def __init__(self, project_id, mount_all, refresh_interval=5):
         self.fd = 0
         self.uid = os.getuid()
         self.gid = os.getgid()
         self.project_id = project_id
+        self.mount_all = mount_all
         self.root = DXInode(DXInode.DIR, 'root', 0755 | stat.S_IFDIR, self.uid, self.gid)
         self.last_created = 0
-        self.project_mtime = 0
         self.refresh_interval = refresh_interval
         self.initialized_once = threading.Event()
+        self.projects = []
 
     def wait_until_initialized(self):
         # Run a less expensive check that doesn't need to acquire a
@@ -186,7 +202,7 @@ class DXFS(LoggingMixIn, Operations):
             self.initialized_once.wait()
 
     def init(self, root_path):
-        ''' This method is used both for initializing the filesystem and for reloading it upon modification.
+        ''' This method is used for fetching projects and initializing the filesystem
         '''
 
         # The event initialized_once is used to prevent any external
@@ -201,33 +217,20 @@ class DXFS(LoggingMixIn, Operations):
         # where only the 'foo' method calls wait_until_initialized, and
         # init() only calls the '_foo' (non-waiting) version.
 
-        if self.project_id.startswith('project-'):
-            self.project = dxpy.DXProject(self.project_id)
+        # Get list of project(s)
+        if self.mount_all:
+            all_projects = dxpy.find_projects(describe=True)
+            for pr in all_projects:
+                self.projects += [Project(project=dxpy.DXProject(pr['id']), description=pr['describe'])]
+        elif self.project_id.startswith('project-'):
+            self.projects += [Project(project=dxpy.DXProject(self.project_id))]
         elif self.project_id.startswith('container-'):
-            self.project = dxpy.DXContainer(self.project_id)
-
-        proj_desc = self.project.describe(input_params={"folders": True})
-
-        self.project_mtime = proj_desc['modified']
-
-        debug("Populating folders...")
-        folders = proj_desc['folders']
-        folders.sort(key=lambda item: (len(item), item))
-        debug("Found", len(folders), "folders")
+            self.projects += [Project(project=dxpy.DXContainer(self.project_id))]
 
         # This is where the old tree gets blown away (when reloading).
         self.root = DXInode(DXInode.DIR, 'root', 0755 | stat.S_IFDIR, self.uid, self.gid)
-
-        for path in folders:
-            if path == '/':
-                continue
-            self._mkdir(str(path), 0755 | stat.S_IFDIR, make_remote=False)
-
-        debug("Populated", len(folders), "folders")
-        debug("Populating data objects...")
-
-        for i in dxpy.search.find_data_objects(project=self.project_id, describe=True):
-            self._new_dataobject(i["describe"])
+        for project in self.projects:
+            self._populate(project)
 
         debug('Finished init')
 
@@ -236,7 +239,39 @@ class DXFS(LoggingMixIn, Operations):
 
         threading.Timer(self.refresh_interval, self.refresh).start()
 
-    def _new_dataobject(self, dataobject, add_missing_folders=False):
+    def _populate(self, project):
+        ''' This method is used for initializing/reloading the filesystem it upon modification '''
+        project.description = project.project.describe(input_params={"folders": True})
+        project.mtime = project.description['modified']
+        folders = project.description['folders']
+        folders.sort(key=lambda item: (len(item), item))
+        debug("----\nPopulating folders for project {} ...".format(project.description['id']))
+        debug("Found", len(folders), "folders in project " + project.description['name'])
+
+        # Create root project directory, for similar names add ID as suffix
+        if [x.description['name'] for x in self.projects].count(project.description['name']) > 1:
+            prefix = '/' + project.description['name'] + '.' + project.description['id']
+        else:
+            prefix = '/' + project.description['name']
+        self._mkdir(prefix, 0755 | stat.S_IFDIR, make_remote=False)
+
+        for path in folders:
+            if path == '/':
+                continue
+            try:
+                self._mkdir(prefix + path, 0755 | stat.S_IFDIR, make_remote=False)
+            except Exception as error:
+                debug("Failed to create directory {path} for project {id}\nMessage: {mes}".format(path=prefix + path,
+                    id=project.description['id'], mes=str(error)))
+                continue
+
+        debug("Populated", len(folders) - 1, "folders")
+        debug("Populating data objects...")
+
+        for i in dxpy.search.find_data_objects(project=project.description['id'], describe=True):
+            self._new_dataobject(i["describe"], prefix=prefix)
+
+    def _new_dataobject(self, dataobject, add_missing_folders=False, prefix='/'):
         dataobject["folder"] = str(dataobject["folder"])
         dataobject["name"] = str(dataobject["name"]).replace("/", "").replace("\0", "")
 
@@ -253,7 +288,7 @@ class DXFS(LoggingMixIn, Operations):
         else:
             mode = 0644
 
-        path = os.path.join(dataobject["folder"], dataobject["name"])
+        path = os.path.join(prefix, dataobject["folder"].lstrip('/'), dataobject["name"])
         self._create(path,
                      mode,
                      ctime=dataobject['created']/1000,
@@ -263,15 +298,33 @@ class DXFS(LoggingMixIn, Operations):
                      describe=dataobject)
         self.last_created = max(self.last_created, dataobject['created'])
 
-    def refresh(self):
-        new_mtime = self.project.describe(input_params={"fields": {"modified": True}})['modified']
-
-        if self.project_mtime < new_mtime:
-            debug("Project was modified ({t1} < {t2}), reloading".format(t1=self.project_mtime, t2=new_mtime))
-            self.init(None)
-            self.project_mtime = new_mtime
+    def _get_project_from_path(self, path):
+        root_folder = path.split('/')[1]
+        if not root_folder:
+            raise IndexError
+        #find it by ID in suffix then by name
+        if root_folder.split('.')[-1] in [x.description['id'] for x in self.projects]:
+            return next(x for x in self.projects if x.description['id'] == root_folder.split('.')[-1])
+        elif root_folder in [x.description['name'] for x in self.projects]:
+            return next(x for x in self.projects if x.description['name'] == root_folder)
         else:
-            threading.Timer(self.refresh_interval, self.refresh).start()
+            raise RuntimeError('Unable to find project by path: ' + path)
+
+    def _get_path_without_project_name(self, path):
+        """
+        This method return full path without prefix that represent Project name(with ID)
+        """
+        return re.sub('^/[a-zA-Z0-9_\-.\ ]*', '', path) or '/'
+
+    def refresh(self):
+        for project in self.projects:
+            new_mtime = project.project.describe(input_params={"fields": {"modified": True}})['modified']
+
+            if project.mtime < new_mtime:
+                debug("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
+                                                                                  t1=project.mtime, t2=new_mtime))
+                self._populate(project)
+        threading.Timer(self.refresh_interval, self.refresh).start()
 
     def chmod(self, path, mode):
         self.wait_until_initialized()
@@ -315,7 +368,9 @@ class DXFS(LoggingMixIn, Operations):
             raise FuseOSError(ENOTDIR)
 
         if dxid is None:
-            f = dxpy.new_dxfile(name=filename, folder=dirname)
+            project = self._get_project_from_path(path)
+            f = dxpy.new_dxfile(name=filename, project=project.description['id'],
+                                folder=self._get_path_without_project_name(dirname))
             dxid = f.get_id()
             describe = f.describe()
         node = DXInode(DXInode.FILE, filename, mode | stat.S_IFREG,
@@ -398,7 +453,8 @@ class DXFS(LoggingMixIn, Operations):
             raise FuseOSError(ENOTDIR)
 
         if make_remote:
-            self.project.new_folder(path)
+            project = self._get_project_from_path(path)
+            project.project.new_folder(self._get_path_without_project_name(path))
 
         node = DXInode(DXInode.DIR, filename, mode | stat.S_IFDIR, self.uid, self.gid)
         debug("Adding dir", node.name, "to", parent.name)
@@ -481,10 +537,12 @@ class DXFS(LoggingMixIn, Operations):
 
         node.name = new_filename
         if node.type == DXInode.DIR:
-            dxpy.api.project_rename_folder(self.project_id, {"folder": oldpath, "newpath": newpath})
+            dxpy.api.project_rename_folder(self.project_id, {"folder": self._get_path_without_project_name(oldpath),
+                                                             "newpath": self._get_path_without_project_name(newpath)})
         else:
+            project = self._get_project_from_path(newpath)
             if new_dirname != old_dirname:
-                self.project.move(new_dirname, [node.handler.get_id()])
+                project.project.move(new_dirname, [node.handler.get_id()])
             node.handler.rename(new_filename)
 
         del old_parent.child_nodes[old_filename]
@@ -494,8 +552,8 @@ class DXFS(LoggingMixIn, Operations):
         self.wait_until_initialized()
         debug('rmdir path:%s' % path)
 
-        parent      = self._parent(path)
-        node        = self._node(path)
+        parent = self._parent(path)
+        node = self._node(path)
 
         if not (parent or node):
             raise FuseOSError(ENOENT)
@@ -503,7 +561,8 @@ class DXFS(LoggingMixIn, Operations):
         if not node.type == DXInode.DIR:
             raise FuseOSError(ENOTDIR)
 
-        self.project.remove_folder(path)
+        project = self._get_project_from_path(path)
+        project.project.remove_folder(self._get_path_without_project_name(path))
         del parent.child_nodes[node.name]
 
     def setxattr(self, path, name, value, flags, position=0):
@@ -607,7 +666,9 @@ class DXFS(LoggingMixIn, Operations):
 
 parser = argparse.ArgumentParser(description="DNAnexus FUSE driver")
 parser.add_argument("mountpoint", help="Directory to mount the filesystem on")
-parser.add_argument("--project-id", help="DNAnexus project ID to mount", default=dxpy.WORKSPACE_ID or '', nargs='?')
+group = parser.add_mutually_exclusive_group()
+group.add_argument("--project-id", help="DNAnexus project ID to mount", default=dxpy.WORKSPACE_ID or '', nargs='?')
+group.add_argument("--all", help="Mount root with all projects as subfolder", action='store_true')
 parser.add_argument("--debug", action='store_true')
 parser.add_argument("--foreground", action='store_true')
 args = parser.parse_args()
@@ -616,7 +677,7 @@ def debug(*args_to_print):
     if args.debug:
         print(*args_to_print)
 
-if not args.project_id.startswith('project-') and not args.project_id.startswith('container-'):
+if not args.project_id.startswith('project-') and not args.project_id.startswith('container-') and not args.all:
     parser.exit(3, "Error: A valid project or container ID was not provided for --project-id\n")
 
 if not args.debug:
@@ -624,7 +685,7 @@ if not args.debug:
     sys.stderr = open(os.devnull, 'w')
 
 logging.getLogger().setLevel(logging.DEBUG)
-fuse = FUSE(DXFS(project_id=args.project_id),
+fuse = FUSE(DXFS(project_id=args.project_id, mount_all=args.all),
             args.mountpoint,
             foreground=args.foreground,
             nothreads=True,
