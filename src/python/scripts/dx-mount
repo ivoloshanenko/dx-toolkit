@@ -272,6 +272,10 @@ class DXFS(LoggingMixIn, Operations):
             self._new_dataobject(i["describe"], prefix=prefix)
 
     def _new_dataobject(self, dataobject, add_missing_folders=False, prefix='/'):
+        '''Now we allow only file and folder objects'''
+        if not dataobject['class'] in ['file', 'folder']:
+            return
+
         dataobject["folder"] = str(dataobject["folder"])
         dataobject["name"] = str(dataobject["name"]).replace("/", "").replace("\0", "")
 

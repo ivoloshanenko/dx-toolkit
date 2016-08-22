@@ -172,5 +172,14 @@ class TestDXFSMountAll(unittest.TestCase):
     def test_dxfs_file_operations(self):
         pass
 
+    def test_dxfs_object_filder(self):
+        '''Special project objects such as records, genomic tables, applets, workflows, etc.,
+        should not listed in the directory view of a project.'''
+        project_id = self.projects.keys()[0]
+        subprocess.check_call(['dx', 'new', 'record', '--close', project_id + ':test-record'])
+        time.sleep(10)
+        self.assertFalse('test-record' in os.listdir(os.path.join(self.mountpoint, self._get_root_folder(project_id))))
+
+
 if __name__ == '__main__':
     unittest.main()
