@@ -357,6 +357,9 @@ class DXFS(LoggingMixIn, Operations):
     def _create(self, path, mode, ctime=None, mtime=None, size=0, dxid=None, describe=None):
         debug('create path:%s mode:%s' % (path, mode))
 
+        if self._get_path_without_project_name(path) == '/':
+            raise IOError('Creating objects of non-folder type in the root directory isn\'t permitted')
+
         if ctime is None:
             ctime = time()
         if mtime is None:
