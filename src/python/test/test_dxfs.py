@@ -62,7 +62,10 @@ class TestDXFS(unittest.TestCase):
         #subprocess.check_call(['dx', 'mkdir', 'bar'])
         #subprocess.check_call(['dx', 'mkdir', '-p', '/bar/baz'])
 
-        self.assertEqual(set(os.listdir(self.mount_project)), set(['foo', 'bar', 'AB testing', os.path.basename(__file__)]))
+        #self.assertEqual(set(os.listdir(self.mount_project)), set(['foo', 'bar', 'AB testing', os.path.basename(__file__)]))
+        self.assertTrue(set(['foo', 'bar', 'AB testing', os.path.basename(__file__)]).issuperset(
+            set(os.listdir(self.mount_project))
+        ))
 
         # Reading
         self.assertEqual(open(__file__).read(), open(os.path.join(self.mount_project, __file__)).read())
@@ -107,7 +110,7 @@ class TestDXFSMountAll(unittest.TestCase):
         cls.projects = {}
         for i in range(4):
             #first two projects with same name
-            project_name = u"dxclient_test_project" if i < 2 else u"dxclient_test_project" + str(i)
+            project_name = u"dxclient_test_pröject" if i < 2 else u"dxclient_test_pröject" + str(i)
             project_id = subprocess.check_output(u"dx new project '{}' --brief".format(project_name), shell=True).strip()
 
             cls.projects[project_id] = project_name

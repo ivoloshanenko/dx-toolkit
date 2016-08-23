@@ -318,7 +318,8 @@ class DXFS(LoggingMixIn, Operations):
         """
         This method return full path without prefix that represent Project name(with ID)
         """
-        return re.sub('^/[a-zA-Z0-9_\-.\ ]*', '', path) or '/'
+        pattern = re.compile(ur'^/.*?((?=/)|(?=$))')
+        return re.sub(pattern, '', path) or '/'
 
     def refresh(self):
         for project in self.projects:
