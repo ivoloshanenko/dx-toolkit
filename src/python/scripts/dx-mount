@@ -44,7 +44,8 @@ def _get_size(obj):
 
 class Project:
 
-    def __init__(self, project=None, description=None, mtime=None):
+    def __init__(self, project=None, id=None, description=None, mtime=None):
+        self.id = id
         self.project = project
         self.description = description
         self.mtime = mtime
@@ -221,11 +222,11 @@ class DXFS(LoggingMixIn, Operations):
         if self.mount_all:
             all_projects = dxpy.find_projects(describe=True)
             for pr in all_projects:
-                self.projects += [Project(project=dxpy.DXProject(pr['id']), description=pr['describe'])]
+                self.projects += [Project(project=dxpy.DXProject(pr['id']), id=pr['id'], description=pr['describe'])]
         elif self.project_id.startswith('project-'):
-            self.projects += [Project(project=dxpy.DXProject(self.project_id))]
+            self.projects += [Project(project=dxpy.DXProject(self.project_id), id=self.project_id)]
         elif self.project_id.startswith('container-'):
-            self.projects += [Project(project=dxpy.DXContainer(self.project_id))]
+            self.projects += [Project(project=dxpy.DXContainer(self.project_id), id=self.project_id)]
 
         # This is where the old tree gets blown away (when reloading).
         self.root = DXInode(DXInode.DIR, 'root', 0755 | stat.S_IFDIR, self.uid, self.gid)
@@ -241,6 +242,8 @@ class DXFS(LoggingMixIn, Operations):
 
     def _populate(self, project):
         ''' This method is used for initializing/reloading the filesystem it upon modification '''
+        # Save old project name before description refresh. It can be useful if project was renamed via DX
+        old_name = project.description['name'] if project.description else None
         project.description = project.project.describe(input_params={"folders": True})
         project.mtime = project.description['modified']
         folders = project.description['folders']
@@ -250,9 +253,17 @@ class DXFS(LoggingMixIn, Operations):
 
         # Create root project directory, for similar names add ID as suffix
         if [x.description['name'] for x in self.projects].count(project.description['name']) > 1:
-            prefix = '/' + project.description['name'] + '.' + project.description['id']
+            prefix = '/' + project.description['name'] + '.' + project.id
         else:
             prefix = '/' + project.description['name']
+
+        # Check if project was renamed via DX, then remove old root directory
+        if old_name:
+            if prefix not in ['/' + old_name, '/' + old_name + '.' + project.id]:
+                parent = self._parent('/' + old_name)
+                del parent.child_nodes[old_name]
+
+        # Create new ROOT directory
         self._mkdir(prefix, 0755 | stat.S_IFDIR, make_remote=False)
 
         for path in folders:
@@ -268,7 +279,7 @@ class DXFS(LoggingMixIn, Operations):
         debug("Populated", len(folders) - 1, "folders")
         debug("Populating data objects...")
 
-        for i in dxpy.search.find_data_objects(project=project.description['id'], describe=True):
+        for i in dxpy.search.find_data_objects(project=project.id, describe=True):
             self._new_dataobject(i["describe"], prefix=prefix)
 
     def _new_dataobject(self, dataobject, add_missing_folders=False, prefix='/'):
@@ -303,6 +314,10 @@ class DXFS(LoggingMixIn, Operations):
         self.last_created = max(self.last_created, dataobject['created'])
 
     def _get_project_from_path(self, path):
+        """
+        This method return Project object for path.
+        If Path is ROOT folder (represent project itself), then return None
+        """
         root_folder = path.split('/')[1]
         if not root_folder:
             raise IndexError
@@ -312,7 +327,8 @@ class DXFS(LoggingMixIn, Operations):
         elif root_folder in [x.description['name'] for x in self.projects]:
             return next(x for x in self.projects if x.description['name'] == root_folder)
         else:
-            raise RuntimeError('Unable to find project by path: ' + path)
+            # None means no project found - path can be just created root directory and project not yet exist
+            return None
 
     def _get_path_without_project_name(self, path):
         """
@@ -322,6 +338,26 @@ class DXFS(LoggingMixIn, Operations):
         return re.sub(pattern, '', path) or '/'
 
     def refresh(self):
+        # Refresh project list in case if all mounted
+        if self.mount_all:
+            all_projects = list(dxpy.find_projects(describe=True))
+            for pr in all_projects:
+                if pr['id'] not in [x.id for x in self.projects]:
+                    self.projects += [Project(project=dxpy.DXProject(pr['id']), id=pr['id'],
+                                              description=pr['describe'], mtime=pr['describe']['modified'])]
+                    self._populate(next(x for x in self.projects if x.id == pr['id']))
+            # Remove projects which does not exist
+            for project in self.projects:
+                if project.id not in [x['id'] for x in all_projects]:
+                    if [x.description['name'] for x in self.projects].count(project.description['name']) > 1:
+                        prefix = os.path.join('/', project.description['name'] + '.' + project.id)
+                    else:
+                        prefix = os.path.join('/', project.description['name'])
+                    self._rmdir(prefix, remove_remote=False)
+                    self.projects.remove(project)
+
+
+        # Populate content for modified projects
         for project in self.projects:
             new_mtime = project.project.describe(input_params={"fields": {"modified": True}})['modified']
 
@@ -329,6 +365,7 @@ class DXFS(LoggingMixIn, Operations):
                 debug("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
                                                                                   t1=project.mtime, t2=new_mtime))
                 self._populate(project)
+
         threading.Timer(self.refresh_interval, self.refresh).start()
 
     def chmod(self, path, mode):
@@ -461,18 +498,19 @@ class DXFS(LoggingMixIn, Operations):
             raise FuseOSError(ENOTDIR)
 
         if make_remote:
-            project = self._get_project_from_path(path)
-            project.project.new_folder(self._get_path_without_project_name(path))
+            if dirname == '/':
+                dxpy.DXProject(None).new(name=filename)
+            else:
+                project = self._get_project_from_path(path)
+                project.project.new_folder(self._get_path_without_project_name(path))
+
 
         node = DXInode(DXInode.DIR, filename, mode | stat.S_IFDIR, self.uid, self.gid)
         debug("Adding dir", node.name, "to", parent.name)
         parent.child_nodes[node.name] = node
         debug("Parent contents:", parent.child_nodes)
 
-        # self.files[path] = dict(st_mode=(S_IFDIR | mode), st_nlink=2,
-        #                         st_size=0, st_ctime=time(), st_mtime=time(),
-        #                         st_atime=time())
-        # self.files['/']['st_nlink'] += 1
+
 
     # def open(self, path, flags):
     #     self.fd += 1
@@ -544,13 +582,21 @@ class DXFS(LoggingMixIn, Operations):
             raise FuseOSError(ENOTDIR)
 
         node.name = new_filename
+        project_new = self._get_project_from_path(newpath)
+        project_old = self._get_project_from_path(oldpath)
         if node.type == DXInode.DIR:
-            dxpy.api.project_rename_folder(self.project_id, {"folder": self._get_path_without_project_name(oldpath),
-                                                             "newpath": self._get_path_without_project_name(newpath)})
+            if project_new == project_old and project_new:
+                dxpy.api.project_rename_folder(project_new.id, {"folder": self._get_path_without_project_name(oldpath),
+                                                            "newpath": self._get_path_without_project_name(newpath)})
+            elif old_dirname == new_dirname == '/' and project_old and not project_new:
+                pr = self._get_project_from_path(oldpath)
+                pr.project.update(name=new_filename)
+            else:
+                raise NotImplementedError('Moving objects in this way not implemented!')
+
         else:
-            project = self._get_project_from_path(newpath)
             if new_dirname != old_dirname:
-                project.project.move(new_dirname, [node.handler.get_id()])
+                project_new.project.move(self._get_path_without_project_name(new_dirname), [node.handler.get_id()])
             node.handler.rename(new_filename)
 
         del old_parent.child_nodes[old_filename]
@@ -558,6 +604,9 @@ class DXFS(LoggingMixIn, Operations):
 
     def rmdir(self, path):
         self.wait_until_initialized()
+        return self._rmdir(path)
+
+    def _rmdir(self, path, remove_remote=True):
         debug('rmdir path:%s' % path)
 
         parent = self._parent(path)
@@ -569,8 +618,14 @@ class DXFS(LoggingMixIn, Operations):
         if not node.type == DXInode.DIR:
             raise FuseOSError(ENOTDIR)
 
-        project = self._get_project_from_path(path)
-        project.project.remove_folder(self._get_path_without_project_name(path))
+        if remove_remote:
+            project = self._get_project_from_path(path)
+            directory = self._get_path_without_project_name(path)
+            if directory == '/':
+                project.project.destroy()
+                self.projects.remove(project)
+            else:
+                project.project.remove_folder(directory)
         del parent.child_nodes[node.name]
 
     def setxattr(self, path, name, value, flags, position=0):

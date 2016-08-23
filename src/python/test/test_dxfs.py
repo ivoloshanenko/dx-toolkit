@@ -114,6 +114,11 @@ class TestDXFSMountAll(unittest.TestCase):
             project_id = subprocess.check_output(u"dx new project '{}' --brief".format(project_name), shell=True).strip()
 
             cls.projects[project_id] = project_name
+
+        # Select first project for operation testing
+        cls.project_id = cls.projects.keys()[0]
+        dxpy.config["DX_PROJECT_CONTEXT_ID"] = cls.project_id
+        dxpy.config["DX_CLI_WD"] = '/'
         dxpy.config.__init__(suppress_warning=True)
 
         cls.mountpoint = tempfile.mkdtemp()
@@ -138,44 +143,116 @@ class TestDXFSMountAll(unittest.TestCase):
         else:
             return self.projects[project_id]
 
-    def test_dxfs_root_folders(self):
+    def test_dxfs_root_folders_mapping(self):
         '''This test check mapping between projects and root folders'''
         os_folders = [x.decode('utf-8') for x in os.listdir(self.mountpoint)]
         dx_folders = [self._get_root_folder(x) for x in self.projects.keys()]
         self.assertTrue(set(os_folders).issuperset(set(dx_folders)))
-        pass
 
     def test_dxfs_folder_operations(self):
-        '''This test check basic operations with folders'''
-        project_id = self.projects.keys()[0]
-        dxpy.config["DX_PROJECT_CONTEXT_ID"] = project_id
-        dxpy.config["DX_CLI_WD"] = '/'
-        #project = dxpy.DXProject(project_id)
-        dxpy.config.__init__(suppress_warning=True)
-
+        """This test check basic operations with folders"""
         # create via DX
         subprocess.check_call(['dx', 'mkdir', 'foo'])
-        subprocess.check_call(['dx', 'mkdir', 'bar'])
         time.sleep(10) #wait for FS sync (5sec default)
-        self.assertTrue(set(os.listdir(os.path.join(self.mountpoint, self._get_root_folder(project_id)))).issuperset(
-                        set(['foo', 'bar'])))
+        self.assertTrue('foo' in os.listdir(os.path.join(self.mountpoint, self._get_root_folder(self.project_id))))
 
         # create via FS
-        path = os.path.join(self.mountpoint, self._get_root_folder(project_id), 'foo2')
+        path = os.path.join(self.mountpoint, self._get_root_folder(self.project_id), 'bar')
         os.mkdir(path)
         time.sleep(5)
-        dx_folders = [x.strip('/') for x in subprocess.check_output(['dx', 'ls', project_id]).split()]
-        self.assertTrue('foo2' in dx_folders)
+        dx_folders = [x.strip('/') for x in subprocess.check_output(['dx', 'ls', self.project_id]).split()]
+        self.assertIn('bar', dx_folders)
 
         # remove via DX
-        subprocess.check_call(['dx', 'rmdir', 'foo2'])
+        subprocess.check_call(['dx', 'rmdir', 'foo'])
         time.sleep(10)
-        self.assertFalse('foo2' in os.listdir(os.path.join(self.mountpoint, self._get_root_folder(project_id))))
+        self.assertNotIn('foo', os.listdir(os.path.join(self.mountpoint, self._get_root_folder(self.project_id))))
+
+        # remove via FS
+        os.rmdir(os.path.join(self.mountpoint, self._get_root_folder(self.project_id), 'bar'))
+        dx_folders = [x.strip('/') for x in subprocess.check_output(['dx', 'ls', self.project_id]).split()]
+        self.assertNotIn('bar', dx_folders)
 
     def test_dxfs_file_operations(self):
-        pass
+        """Test basic operations like create, rename, copy, remove"""
+        path = os.path.join(self.mountpoint, self._get_root_folder(self.project_id))
+        # Create via DX
+        dxpy.upload_local_file(__file__, wait_on_close=True)
+        self.assertIn(os.path.basename(__file__), os.listdir(path))
 
-    def test_dxfs_object_filder(self):
+        # Remove via DX
+        subprocess.check_call(['dx', 'rm', os.path.basename(__file__)])
+        time.sleep(10)
+        self.assertNotIn(os.path.basename(__file__), [x.decode('utf-8') for x in os.listdir(path)])
+
+        # Create via FS
+        self.assertNotIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', self.project_id]).split())
+        shutil.copy(__file__, path)
+        self.assertIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', self.project_id]).split())
+
+        # Remove via FS
+        os.remove(os.path.join(path, os.path.basename(__file__)))
+        self.assertNotIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', self.project_id]).split())
+
+        # Create, move and rename
+        shutil.copy(__file__, path)
+        self.assertIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', self.project_id]).split())
+        os.mkdir(path + '/test_dir')
+        shutil.move(os.path.join(path, os.path.basename(__file__)), os.path.join(path, 'test_dir'))
+        self.assertIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', 'test_dir']).split())
+        shutil.move(os.path.join(path, 'test_dir', os.path.basename(__file__)), os.path.join(path, 'test_dir/newfile'))
+        self.assertIn('newfile', subprocess.check_output(['dx', 'ls', 'test_dir']).split())
+        subprocess.check_call(['dx', 'mv', '/test_dir/newfile', '/test_dir/newfile2'])
+        time.sleep(10)
+        self.assertIn('newfile2', os.listdir(os.path.join(path, 'test_dir')))
+
+    def test_dxfs_root_folder_operations(self):
+        """This test check project create, rename, remove and restrictions in root folder
+        We need uniq project name here, otherwise it name can be changed on FS (with ID as suffix)"""
+        try:
+            project1 = os.path.basename(tempfile.NamedTemporaryFile().name)
+            project2 = os.path.basename(tempfile.NamedTemporaryFile().name)
+
+            # Create new project via DX
+            project1_id = subprocess.check_output(['dx', 'new', 'project', '--brief', project1]).strip()
+            time.sleep(10)
+            self.assertIn(project1, os.listdir(self.mountpoint))
+
+            # Create new project via FS
+            os.mkdir(os.path.join(self.mountpoint, project2))
+            projects = list(x['describe']['name'] for x in list(dxpy.find_projects(describe={'fields': {'name': True}})))
+            self.assertIn(project2, projects)
+
+            # Rename projects
+            new_name1 = os.path.basename(tempfile.NamedTemporaryFile().name)
+            new_name2 = os.path.basename(tempfile.NamedTemporaryFile().name)
+            dxpy.DXProject(project1_id).update(name=new_name1)
+            time.sleep(10)
+            self.assertIn(new_name1, os.listdir(self.mountpoint))
+            shutil.move(os.path.join(self.mountpoint, project2), os.path.join(self.mountpoint, new_name2))
+            projects = list(x['describe']['name'] for x in list(dxpy.find_projects(describe={'fields': {'name': True}})))
+            self.assertIn(new_name2, projects)
+            project1 = new_name1
+            project2 = new_name2
+
+            # Remove projects
+            dxpy.DXProject(project1_id).destroy()
+            time.sleep(10)
+            self.assertNotIn(project1, os.listdir(self.mountpoint))
+            os.rmdir(os.path.join(self.mountpoint, project2))
+            projects = list(x['describe']['name'] for x in list(dxpy.find_projects(describe={'fields': {'name': True}})))
+            self.assertNotIn(new_name2, projects)
+
+            # Check restrictions in root folder, forbid copy/create files in root
+            with self.assertRaises(IOError):
+                shutil.copy(__file__, self.mountpoint)
+            self.assertNotIn(os.path.basename(__file__), os.listdir(self.mountpoint))
+        finally:
+            for pr in [project1, project2]:
+                subprocess.call(['dx', 'rmproject', '-y', pr])
+
+
+    def test_dxfs_object_filter(self):
         '''Special project objects such as records, genomic tables, applets, workflows, etc.,
         should not listed in the directory view of a project.'''
         project_id = self.projects.keys()[0]
