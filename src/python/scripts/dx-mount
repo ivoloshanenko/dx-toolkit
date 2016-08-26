@@ -57,7 +57,7 @@ class DXInode(object):
     LINK = 'link'
 
     def __init__(self, type, name, mode, uid, gid, ctime=None, mtime=None, size=0, dxid=None, describe=None):
-        debug("New inode", type, name, mode, uid, gid)
+        logger.debug("New inode {} {} {} {} {}".format(type, name.encode('utf-8'), mode, uid, gid))
         self.type = type
         self.name = name     # file name
         self.dev  = 0        # device ID (if special file)
@@ -107,7 +107,7 @@ class DXInode(object):
         self.ctime = self.atime    # time of last status change
 
     def stat(self):
-        debug("Constructing stat for", self.name)
+        logger.debug("Constructing stat for {}".format(self.name.encode('utf-8')))
         try:
             stat = dict(
                 st_mode  = self.mode,       # protection bits
@@ -122,12 +122,12 @@ class DXInode(object):
                 st_ctime = self.ctime,      # platform dependent; time of most recent metadata change on Unix, or the time of creation on Windows
             )
         except Exception as e:
-            debug("EXCEPTION", e)
-        debug("returning stat for", self.name)
+            logger.error("EXCEPTION {}".format(str(e)))
+        logger.debug("returning stat for {}".format(self.name.encode('utf-8')))
         return stat
 
     def child(self, path):
-        debug(self.name, 'asked for child', path)
+        logger.debug('{name} asked for child {path}'.format(name=self.name.encode('utf-8'), path=path.encode('utf-8')))
         match = None
         if self.type == DXInode.DIR:
             nodes = path.split('/')
@@ -137,11 +137,11 @@ class DXInode(object):
                     match = child.child('/'.join(nodes[1:]))
                 else:
                     match = child
-                    debug("Found child", match.name)
+                    logger.debug("Found child {}".format(match.name.encode('utf-8')))
         return match
 
     def read(self, offset, length):
-        debug("Reading from", self.name, offset, length)
+        logger.debug("Reading from {} {} {}".format(self.name.encode('utf-8'), offset, length))
         #stat.st_atime = time.now()
         if self.dxid and self.dxid.startswith('file'):
             if self.handler.state != 'closed':
@@ -167,8 +167,13 @@ class DXInode(object):
 
     def write(self, offset, data):
         if self.dxid and self.dxid.startswith('file'):
-            # TODO: write seek
-            self.handler.write(data)
+            # TODO: write seek, overwrite, append?
+            if self.handler.closed():
+                logger.error('File closed! Writing not supported')
+                #raise NotImplementedError('File closed! Writing not supported')
+            else:
+                self.handler.write(data)
+                self.handler.close()
         else:
             raise NotImplementedError()
 
@@ -177,13 +182,13 @@ class DXInode(object):
         return len(data)
 
     def truncate(self, length):
-        debug("Truncating", self.name)
+        logger.debug("Truncating {}".format(self.name.encode('utf-8')))
         self.data = self.data[0:length]
         self.now()
 
 
 class DXFS(LoggingMixIn, Operations):
-    def __init__(self, project_id, mount_all, logger, refresh_interval=5):
+    def __init__(self, project_id, mount_all, refresh_interval=5):
         self.fd = 0
         self.uid = os.getuid()
         self.gid = os.getgid()
@@ -194,7 +199,6 @@ class DXFS(LoggingMixIn, Operations):
         self.refresh_interval = refresh_interval
         self.initialized_once = threading.Event()
         self.projects = []
-        self.logger = logger
 
 
     def wait_until_initialized(self):
@@ -229,19 +233,18 @@ class DXFS(LoggingMixIn, Operations):
             self.projects += [Project(project=dxpy.DXProject(self.project_id), id=self.project_id)]
         elif self.project_id.startswith('container-'):
             self.projects += [Project(project=dxpy.DXContainer(self.project_id), id=self.project_id)]
-        self.logger.debug('Received {} projects from API server'.format(len(self.projects)))
+        logger.debug('Received {} projects from API server'.format(len(self.projects)))
 
         # This is where the old tree gets blown away (when reloading).
         self.root = DXInode(DXInode.DIR, 'root', 0755 | stat.S_IFDIR, self.uid, self.gid)
         for project in self.projects:
             self._populate(project)
 
-        debug('Finished init')
+        logger.debug('Finished init')
 
         if not self.initialized_once.is_set():
             self.initialized_once.set()
 
-        self.logger.info('Initialization finished')
         threading.Timer(self.refresh_interval, self.refresh).start()
 
     def _populate(self, project):
@@ -252,9 +255,9 @@ class DXFS(LoggingMixIn, Operations):
         project.mtime = project.description['modified']
         folders = project.description['folders']
         folders.sort(key=lambda item: (len(item), item))
-        debug("----\nPopulating folders for project {} ...".format(project.description['id']))
-        debug("Found", len(folders), "folders in project " + project.description['name'])
-        self.logger.debug('Populating {pr} project with {num} folders'.format(pr=project.description['id'], num=len(folders)))
+        logger.debug("Populating folders for project {} ...".format(project.description['id']))
+        logger.debug("Found {num} folders in project {name}".format(num=len(folders),
+                                                                    name=project.description['name'].encode('utf-8')))
 
         # Create root project directory, for similar names add ID as suffix
         if [x.description['name'] for x in self.projects].count(project.description['name']) > 1:
@@ -276,25 +279,23 @@ class DXFS(LoggingMixIn, Operations):
                 continue
             try:
                 self._mkdir(prefix + path, 0755 | stat.S_IFDIR, make_remote=False)
-                self.logger.debug('{} folder created'.format(prefix.encode('utf-8') + path.encode('utf-8')))
+                logger.debug('{} folder created'.format(prefix.encode('utf-8') + path.encode('utf-8')))
             except Exception as error:
-                message = "Failed to create directory {path} for project {id}\nMessage: {mes}".format(
-                    path=prefix.encode('utf-8') + path.encode('utf-8'), id=project.description['id'], mes=str(error))
-                self.logger.error(message)
-                debug(message)
+                logger.error("Failed to create directory {path} for project {id}\nMessage: {mes}".format(
+                    path=prefix.encode('utf-8') + path.encode('utf-8'), id=project.description['id'], mes=str(error)))
                 continue
 
-        debug("Populated", len(folders) - 1, "folders")
-        debug("Populating data objects...")
+        logger.debug("Populated {} folders".format(len(folders) - 1))
+        logger.debug("Populating data objects...")
 
         for i in dxpy.search.find_data_objects(project=project.id, describe=True):
             self._new_dataobject(i["describe"], prefix=prefix)
 
     def _new_dataobject(self, dataobject, add_missing_folders=False, prefix='/'):
         '''Now we allow only file and folder objects'''
-        self.logger.debug('Creating new dataobject {}'.format(dataobject["name"]))
+        logger.debug('Creating new dataobject {}'.format(dataobject["name"].encode('utf-8')))
         if not dataobject['class'] in ['file', 'folder']:
-            self.logger.debug('Object {} not file or folder, skipping'.format(dataobject["name"]))
+            logger.debug('Object {} not file or folder, skipping'.format(dataobject["name"].encode('utf-8')))
             return
 
         dataobject["folder"] = str(dataobject["folder"])
@@ -321,7 +322,7 @@ class DXFS(LoggingMixIn, Operations):
                      size=_get_size(dataobject),
                      dxid=dataobject['id'],
                      describe=dataobject)
-        self.logger.debug('Object {name} created with size {size}'.format(name=dataobject['name'], size=_get_size(dataobject)))
+        logger.debug('Object {name} created with size {size}'.format(name=dataobject['name'].encode('utf-8'), size=_get_size(dataobject)))
         self.last_created = max(self.last_created, dataobject['created'])
 
     def _get_project_from_path(self, path):
@@ -348,9 +349,26 @@ class DXFS(LoggingMixIn, Operations):
         pattern = re.compile(ur'^/.*?((?=/)|(?=$))')
         return re.sub(pattern, '', path) or '/'
 
+    def _get_unique_file_name(self, path, dxid):
+        """This method checks if other file exist with same name, then add suffix as '.<id>'"""
+        logger.debug('generating unique filename for {}'.format(path.encode('utf-8')))
+        if dxid in os.path.basename(path).split('.'):
+            original_name = os.path.basename(path).split('.')[0]
+        else:
+            original_name = os.path.basename(path)
+        dx_path = self._get_path_without_project_name(path)
+        project = self._get_project_from_path(path)
+        folder = os.path.dirname(dx_path)
+        objects = project.project.list_folder(folder=folder, describe={'fields': {'id': True, 'name': True, 'class': True}})
+        files = [x['describe']['name'] for x in objects['objects'] if x['describe']['class'] == 'file']
+        if files.count(original_name) > 1:
+            return original_name + '.' + dxid
+        else:
+            return original_name
+
     def refresh(self):
         # Refresh project list in case if all mounted
-        self.logger.debug('Refreshing filesystem')
+        logger.debug('Refreshing filesystem')
         if self.mount_all:
             all_projects = list(dxpy.find_projects(describe=True))
             for pr in all_projects:
@@ -365,7 +383,7 @@ class DXFS(LoggingMixIn, Operations):
                         prefix = os.path.join('/', project.description['name'] + '.' + project.id)
                     else:
                         prefix = os.path.join('/', project.description['name'])
-                    self.logger.debug('Removing project {} from list as it doesn\'t exist'.format(project.id))
+                    logger.debug('Removing project {} from list as it doesn\'t exist'.format(project.id))
                     self._rmdir(prefix, remove_remote=False)
                     self.projects.remove(project)
 
@@ -375,47 +393,40 @@ class DXFS(LoggingMixIn, Operations):
             new_mtime = project.project.describe(input_params={"fields": {"modified": True}})['modified']
 
             if project.mtime < new_mtime:
-                message = "Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
-                                                                                  t1=project.mtime, t2=new_mtime)
-                self.logger.debug(message)
-                debug(message)
+                logger.debug("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
+                                                                                  t1=project.mtime, t2=new_mtime))
                 self._populate(project)
 
         threading.Timer(self.refresh_interval, self.refresh).start()
 
     def chmod(self, path, mode):
         self.wait_until_initialized()
-        debug('chmod path:%s mode:%s' % (path, mode))
-
+        logger.info('CHMOD mode:{mode} path:{path}'.format(mode=mode, path=path.encode('utf-8')))
         node = self._node(path)
         if not node:
             raise FuseOSError(ENOENT)
         node.mode = mode
-        self.logger.info('CHMOD {mode} executed on {path}'.format(mode=mode, path=path.encode('utf-8')))
         return 0
 
     def chown(self, path, uid, gid):
         self.wait_until_initialized()
-        debug('chown path:%s uid:%s gid:%s' % (path, uid, gid))
-
+        logger.info('CHOWN {uid}:{gid} path:{path}'.format(path=path.encode('utf-8'), uid=uid, gid=gid))
         node = self._node(path)
         if not node:
             raise FuseOSError(ENOENT)
         node.uid = uid
         node.gid = gid
-        self.logger.info('CHOWN {uid}:{gid} executed on {path}'.format(path=path.encode('utf-8'), uid=uid, gid=gid))
 
     def create(self, *args, **kwargs):
         self.wait_until_initialized()
         return self._create(*args, **kwargs)
 
     def _create(self, path, mode, ctime=None, mtime=None, size=0, dxid=None, describe=None):
-        debug('create path:%s mode:%s' % (path, mode))
-        self.logger.info('CREATE executed on {path} with mode {mode}'.format(mode=mode, path=path.encode('utf-8')))
+        logger.info('CREATE path:{path} mode:{mode}'.format(mode=mode, path=path.encode('utf-8')))
 
         if self._get_path_without_project_name(path) == '/':
             message = 'Creating objects of non-folder type in the root directory isn\'t permitted'
-            self.logger.error(message)
+            logger.error(message)
             raise IOError(message)
 
         if ctime is None:
@@ -432,19 +443,18 @@ class DXFS(LoggingMixIn, Operations):
         if not parent.type == DXInode.DIR:
             raise FuseOSError(ENOTDIR)
 
+        project = self._get_project_from_path(path)
+
         if dxid is None:
-            project = self._get_project_from_path(path)
             f = dxpy.new_dxfile(name=filename, project=project.description['id'],
                                 folder=self._get_path_without_project_name(dirname))
             dxid = f.get_id()
             describe = f.describe()
-        node = DXInode(DXInode.FILE, filename, mode | stat.S_IFREG,
-                       self.uid, self.gid,
+        unique_name = self._get_unique_file_name(path, dxid)
+        node = DXInode(DXInode.FILE, unique_name, mode | stat.S_IFREG, self.uid, self.gid,
                        ctime=ctime, mtime=mtime, size=size, dxid=dxid, describe=describe)
-
-        debug("Adding file", node.name, "to", parent.name)
-        self.logger.debug("Adding file {file} to {target}".format(file=node.name.encode('utf-8'),
-                                                                  target=parent.name.encode('utf-8')))
+        logger.debug("Adding file {file} to {target}".format(file=node.name.encode('utf-8'),
+                                                             target=parent.name.encode('utf-8')))
         parent.child_nodes[node.name] = node
         #debug("Parent contents:", parent.data)
 
@@ -457,21 +467,17 @@ class DXFS(LoggingMixIn, Operations):
 
     def getattr(self, path, fh=None):
         self.wait_until_initialized()
-        debug('getattr path:%s' % path)
-        self.logger.debug('GETATTR executed on {}'.format(path.encode('utf-8')))
-
+        logger.debug('GETATTR path:{}'.format(path.encode('utf-8')))
         node = self._node(path)
         if not node:
-            debug("getattr: path", path, "not found")
-            self.logger.debug("getattr: path: {} not found".format(path.encode('utf-8')))
+            logger.debug("getattr: {} not found".format(path.encode('utf-8')))
             raise FuseOSError(ENOENT)
         else:
             return node.stat()
 
     def getxattr(self, path, name, position=0):
         self.wait_until_initialized()
-        debug('getxattr path:%s name:%s' % (path, name))
-        self.logger.debug('GETXATTR executed on {path} name:{name}'.format(path=path.encode('utf-8'), name=name.encode('utf-8')))
+        logger.debug('GETXATTR path:{path} name:{name}'.format(path=path.encode('utf-8'), name=name.encode('utf-8')))
 
         node = self._node(path)
         if not node:
@@ -496,15 +502,14 @@ class DXFS(LoggingMixIn, Operations):
 
     def listxattr(self, path):
         self.wait_until_initialized()
-        debug('listxattr path:%s' % path)
-        self.logger.info('LISTXATTR executed on {}'.format(path.encode('utf-8')))
+        logger.info('LISTXATTR path:{}'.format(path.encode('utf-8')))
 
         node = self._node(path)
         if not node:
             raise FuseOSError(ENOENT)
 
         attrs = [str(attr) for attr in node.describe.keys()]
-        debug(attrs)
+        logger.debug(attrs)
         return attrs
 
     def mkdir(self, *args, **kwargs):
@@ -512,8 +517,7 @@ class DXFS(LoggingMixIn, Operations):
         return self._mkdir(*args, **kwargs)
 
     def _mkdir(self, path, mode, make_remote=True):
-        debug('mkdir path:%s mode:%s' % (path, mode))
-        self.logger.info('MKDIR executed path:{path} mode:{mode}'.format(path=path.encode('utf-8'), mode=mode))
+        logger.info('MKDIR path:{path} mode:{mode}'.format(path=path.encode('utf-8'), mode=mode))
 
         dirname, filename = os.path.split(path)
         parent = self._parent(path)
@@ -527,19 +531,16 @@ class DXFS(LoggingMixIn, Operations):
         if make_remote:
             if dirname == '/':
                 dxpy.DXProject(None).new(name=filename)
-                self.logger.info('Directory in root folder, new project created with name {}'.format(filename))
+                logger.info('Directory in root folder, new project created with name {}'.format(filename.encode('utf-8')))
             else:
                 project = self._get_project_from_path(path)
                 project.project.new_folder(self._get_path_without_project_name(path))
-                self.logger.debug('New directory created on server: {}'.format(self._get_path_without_project_name(path.encode('utf-8'))))
+                logger.debug('New directory created on server: {}'.format(self._get_path_without_project_name(path.encode('utf-8'))))
 
         node = DXInode(DXInode.DIR, filename, mode | stat.S_IFDIR, self.uid, self.gid)
-        debug("Adding dir", node.name, "to", parent.name)
-        self.logger.debug("Adding dir {name} to {parent}".format(name=node.name.encode('utf-8'), parent=parent.name.encode('utf-8')))
+        logger.debug("Adding dir {name} to {parent}".format(name=node.name.encode('utf-8'), parent=parent.name.encode('utf-8')))
         parent.child_nodes[node.name] = node
-        debug("Parent contents:", parent.child_nodes)
-
-
+        logger.debug("Parent contents: {}".format(parent.child_nodes))
 
     # def open(self, path, flags):
     #     self.fd += 1
@@ -547,8 +548,7 @@ class DXFS(LoggingMixIn, Operations):
 
     def read(self, path, size, offset, fh):
         self.wait_until_initialized()
-        debug('read path:%s size:%s offset:%s' % (path, size, offset))
-        self.logger.info('READ executed on {}'.format(path.encode('utf-8')))
+        logger.info('READ path:{} size:{} offset:{}'.format(path.encode('utf-8'), size, offset))
 
         node = self._node(path)
 
@@ -559,25 +559,22 @@ class DXFS(LoggingMixIn, Operations):
 
     def readdir(self, path, fh):
         self.wait_until_initialized()
-        debug('readdir path:%s' % path)
-        self.logger.debug('READDIR executed on {}'.format(path.encode('utf-8')))
+        logger.debug('READDIR path:{}'.format(path.encode('utf-8')))
 
         node = self._node(path)
-        debug("reading dir", node.name, len(node.child_nodes), "entries")
 
         for meta in ['.', '..']:
-            debug("yielding", meta)
+            logger.debug("yielding {}".format(meta))
             yield meta
             #yield fuse.Direntry(meta)
         for child_name in node.child_nodes:
-            debug("yielding", child_name)
+            logger.debug("yielding {}".format(child_name.encode('utf-8')))
             yield child_name
             #yield fuse.Direntry(child.name)
 
     def readlink(self, path):
         self.wait_until_initialized()
-        debug('readlink path:%s' % path)
-        self.logger.info('READLINK executed on {}'.format(path.encode('utf-8')))
+        logger.debug('READLINK path:{}'.format(path.encode('utf-8')))
 
         node = self._node(path)
         if not node:
@@ -587,8 +584,7 @@ class DXFS(LoggingMixIn, Operations):
 
     def removexattr(self, path, name):
         self.wait_until_initialized()
-        debug('removexattr path:%s name:%s' % (path, name))
-        self.logger.info('REMOVEXATTR executed on path:{path} name:{name}'.format(path=path.encode('utf-8'), name=name.encode('utf-8')))
+        logger.info('REMOVEXATTR path:{path} name:{name}'.format(path=path.encode('utf-8'), name=name.encode('utf-8')))
 
         node = self._node(path)
         if not node:
@@ -600,8 +596,7 @@ class DXFS(LoggingMixIn, Operations):
 
     def rename(self, oldpath, newpath):
         self.wait_until_initialized()
-        debug('rename oldpath:%s newpath:%s' % (oldpath, newpath))
-        self.logger.info('RENAME executed, old name:{old} new name:{new}'.format(old=oldpath.encode('utf-8'), new=newpath.encode('utf-8')))
+        logger.info('RENAME executed, old name:{old} new name:{new}'.format(old=oldpath.encode('utf-8'), new=newpath.encode('utf-8')))
 
         old_dirname, old_filename = os.path.split(oldpath)
         new_dirname, new_filename = os.path.split(newpath)
@@ -614,6 +609,10 @@ class DXFS(LoggingMixIn, Operations):
 
         if not new_parent.type == DXInode.DIR:
             raise FuseOSError(ENOTDIR)
+
+        # Check filename for duplicates and rename destination if needed. Original name we taking from node
+        if node.type == DXInode.FILE:
+            new_filename = self._get_unique_file_name(newpath, node.handler.get_id())
 
         node.name = new_filename
         project_new = self._get_project_from_path(newpath)
@@ -641,8 +640,7 @@ class DXFS(LoggingMixIn, Operations):
         return self._rmdir(path)
 
     def _rmdir(self, path, remove_remote=True):
-        debug('rmdir path:%s' % path)
-        self.logger.info('RMDIR executed on {}'.format(path.encode('utf-8')))
+        logger.info('RMDIR path:{}'.format(path.encode('utf-8')))
 
         parent = self._parent(path)
         node = self._node(path)
@@ -659,16 +657,15 @@ class DXFS(LoggingMixIn, Operations):
             if directory == '/':
                 project.project.destroy()
                 self.projects.remove(project)
-                self.logger.info('Directory in root folder. Project {} removed'.format(project.id))
+                logger.info('Directory in root folder. Project {} removed'.format(project.id))
             else:
                 project.project.remove_folder(directory)
         del parent.child_nodes[node.name]
 
     def setxattr(self, path, name, value, flags, position=0):
         self.wait_until_initialized()
-        debug('setxattr path:%s name:%s value:%s flags:%s' % (path, name, value, flags))
-        self.logger.info('SETXATTR executed, path:{path} name:{name} value:{value}'.format(
-            path=path.encode('utf-8'), name=name.encode('utf-8'), value=value))
+        logger.info('SETXATTR path:{path} name:{name} value:{value}'.format(
+                    path=path.encode('utf-8'), name=name.encode('utf-8'), value=value))
 
         node = self._node(path)
         if not node:
@@ -680,11 +677,11 @@ class DXFS(LoggingMixIn, Operations):
             prop_name, prop_value = value.split(":")
             node.handler.add_properties({prop_name: prop_value})
         elif name == 'state' and value == 'closed':
-            debug("closing", node)
+            logger.debug("closing {}".format(node))
             node.handler.close(block=True)
             node.reload()
             node.size = node.handler.size
-            debug("closed", node)
+            logger.debug("closed {}".format(node))
         node.xattr[name] = value
 
     def statfs(self, path):
@@ -692,9 +689,8 @@ class DXFS(LoggingMixIn, Operations):
 
     def symlink(self, target, source):
         self.wait_until_initialized()
-        debug('symlink path:%s newpath:%s' % (target, source))
-        self.logger.info('SYMLINK executed, target:{target} source:{source}'.format(
-            target=target.encode('utf-8'), source=source.encode('utf-8')))
+        logger.info('SYMLINK target:{target} source:{source}'.format(target=target.encode('utf-8'),
+                                                                     source=source.encode('utf-8')))
 
         source_node = self._node(target)
         filename    = os.path.basename(source)
@@ -713,8 +709,7 @@ class DXFS(LoggingMixIn, Operations):
 
     def truncate(self, path, length, fh=None):
         self.wait_until_initialized()
-        debug('truncate path:%s len:%s' % (path, length))
-        self.logger.info('TRUNCATE executed. path:{path}, length:{length}'.format(path=path.encode('utf-8'), length=length))
+        logger.info('TRUNCATE path:{path}, length:{length}'.format(path=path.encode('utf-8'), length=length))
 
         node = self._node(path)
 
@@ -725,8 +720,7 @@ class DXFS(LoggingMixIn, Operations):
 
     def unlink(self, path):
         self.wait_until_initialized()
-        debug('unlink path:%s' % path)
-        self.logger.info('UNLINK executed on {}'.format(path.encode('utf-8')))
+        logger.info('UNLINK path:{}'.format(path.encode('utf-8')))
 
         parent = self._parent(path)
         child  = self._node(path)
@@ -734,14 +728,13 @@ class DXFS(LoggingMixIn, Operations):
         if not (parent or child):
             raise FuseOSError(ENOENT)
 
-        debug("Removing", child.handler)
+        logger.debug("Removing {}".format(child.handler))
         child.handler.remove()
         del parent.child_nodes[child.name]
 
     def utimens(self, path, times=None):
         self.wait_until_initialized()
-        debug('utime path:%s times:%s' % (path, times))
-        self.logger.info('UTIME executed, path:{}'.format(path.encode('utf-8')))
+        logger.info('UTIME executed, path:{} {}'.format(path.encode('utf-8'), times))
 
         node = self._node(path)
         if not node:
@@ -750,8 +743,8 @@ class DXFS(LoggingMixIn, Operations):
 
     def write(self, path, data, offset, fh):
         self.wait_until_initialized()
-        debug('write path:%s buflen:%s offset:%s' % (path, len(data), offset))
-        self.logger.info('WRITE executed, path:{path}, data len:{data}'.format(path=path.encode('utf-8'), data=len(data)))
+        logger.info('WRITE path:{path}, len:{data}, offset:{offset}'.format(path=path.encode('utf-8'), data=len(data),
+                                                                            offset=offset))
 
         node = self._node(path)
 
@@ -782,28 +775,27 @@ parser.add_argument("--logfile", help="Output log into file", metavar='<filename
 parser.add_argument("--loglevel", help="Log level", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
 args = parser.parse_args()
 
-def debug(*args_to_print):
-    if args.debug:
-        print(*args_to_print)
-
 if not args.project_id.startswith('project-') and not args.project_id.startswith('container-') and not args.all:
     parser.exit(3, "Error: A valid project or container ID was not provided for --project-id\n")
 
-if not args.debug:
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
-
 #format='%(asctime)s %(name)-1s %(levelname)-8s {user} %(message)s'.format(user=dxpy.whoami())
-logging.basicConfig(filename=args.logfile,
-                    level=logging.getLevelName(args.loglevel) if args.loglevel else logging.INFO,
-                    format='%(asctime)s %(levelname)-8s {user} %(message)s'.format(user=dxpy.whoami()),
-                    datefmt='%Y-%m-%d %H:%M')
-if not args.logfile:
-    logging.disable(logging.CRITICAL)
+formatter = logging.Formatter('%(asctime)s %(levelname)-8s {user} %(message)s'.format(user=dxpy.whoami()), datefmt='%Y-%m-%d %H:%M:%S')
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+to_console = logging.StreamHandler(sys.stdout)
+to_console.setLevel(logging.DEBUG if args.debug else logging.NOTSET)
+to_console.setFormatter(formatter)
+logger.addHandler(to_console)
+if args.logfile:
+    to_file = logging.FileHandler(args.logfile)
+    to_file.setLevel(logging.getLevelName(args.loglevel) if args.loglevel else logging.INFO)
+    to_file.setFormatter(formatter)
+    logger.addHandler(to_file)
 
-fuse = FUSE(DXFS(project_id=args.project_id, mount_all=args.all, logger=logging.getLogger(__name__)),
+fuse = FUSE(DXFS(project_id=args.project_id, mount_all=args.all),
             args.mountpoint,
             foreground=args.foreground,
             nothreads=True,
             fsname='dnanexus:'+args.project_id,
             subtype='dxfs')
+

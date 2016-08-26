@@ -178,6 +178,7 @@ class TestDXFSMountAll(unittest.TestCase):
         path = os.path.join(self.mountpoint, self._get_root_folder(self.project_id))
         # Create via DX
         dxpy.upload_local_file(__file__, wait_on_close=True)
+        time.sleep(10)
         self.assertIn(os.path.basename(__file__), os.listdir(path))
 
         # Remove via DX
