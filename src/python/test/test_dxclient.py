@@ -549,7 +549,6 @@ class TestDXClient(DXTestCase):
         my_properties = dxpy.api.project_describe(self.project, {"properties": True})['properties']
         self.assertEqual(my_properties["bar"], "")
 
-    @unittest.skipUnless(testutil.TEST_ONLY_MASTER, 'skipping test that requires latest server version')
     def test_dx_describe_project(self):
         # Look for field name, some number of spaces, and then the value
         field_regexp = lambda fieldname, value: \
@@ -2885,8 +2884,7 @@ def main():
         shell.close()
         self.assertEqual(3, shell.exitstatus)
 
-    @unittest.skipUnless(testutil.TEST_ONLY_MASTER and testutil.TEST_RUN_JOBS,
-                         "skipping test that requires latest server version and that would run jobs")
+    @unittest.skipUnless(testutil.TEST_RUN_JOBS, "skipping test that would run jobs")
     def test_bundledDepends_name_with_whitespaces(self):
         # upload a tar.gz file with spaces in its name
         bundle_name = "test bundle with spaces.tar.gz"
@@ -2919,19 +2917,6 @@ def main():
         applet_job = bundle_applet.run({})
         applet_job.wait_on_done()
         self.assertEqual(applet_job.describe()['state'], 'done')
-
-    def test_bundledDepends_name_with_special_chars_locally(self):
-        # dx-unpack will fail for tarball names containing '$' at the begining of a word,
-        # example: "test '$bundle' \"with\" \"@#^&%()[]{}\" spaces.tar.gz"
-        bundle_name = "test 'bundle' \"with\" \"@#^&%()[]{}\" spaces.tar.gz"
-        bundle_tmp_dir = tempfile.mkdtemp()
-        os.mkdir(os.path.join(bundle_tmp_dir, "a"))
-        with open(os.path.join(bundle_tmp_dir, 'a', 'foo.txt'), 'w') as file_in_bundle:
-            file_in_bundle.write('foo\n')
-        subprocess.check_call(['tar', '-czf', os.path.join(bundle_tmp_dir, bundle_name),
-                               '-C', os.path.join(bundle_tmp_dir, 'a'), '.'])
-        subprocess.check_call(["dx-unpack", os.path.join(bundle_tmp_dir, bundle_name)])
-        os.remove(os.path.join(os.getcwd(), 'foo.txt'))
 
 
 class TestDXClientWorkflow(DXTestCase):
@@ -3574,6 +3559,10 @@ class TestDXClientWorkflow(DXTestCase):
 
 class TestDXClientFind(DXTestCase):
 
+    def assert_cmd_gives_ids(self, cmd, ids):
+        self.assertEqual(set(execid.strip() for execid in run(cmd).splitlines()),
+                         set(ids))
+
     def test_dx_find_apps(self):
         # simple test here does not assume anything about apps that do
         # or do not exist
@@ -4048,32 +4037,126 @@ class TestDXClientFind(DXTestCase):
         self.assertEqual(len(run("dx find jobs "+options2).splitlines()), 0)
         self.assertEqual(len(run("dx find analyses "+options2).splitlines()), 0)
 
-        def assert_cmd_gives_ids(cmd, ids):
-            self.assertEqual(set(execid.strip() for execid in run(cmd).splitlines()),
-                             set(ids))
-
         # Search by tag
         options2 = options + " --all-jobs --brief"
         options3 = options2 + " --tag foo"
         analysis_id = dxanalysis.get_id()
         job_id = dxjob.get_id()
-        assert_cmd_gives_ids("dx find executions "+options3, [analysis_id, job_id])
-        assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
-        assert_cmd_gives_ids("dx find analyses "+options3, [analysis_id])
+        self.assert_cmd_gives_ids("dx find executions "+options3, [analysis_id, job_id])
+        self.assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
+        self.assert_cmd_gives_ids("dx find analyses "+options3, [analysis_id])
         options3 = options2 + " --tag foo --tag bar"
-        assert_cmd_gives_ids("dx find executions "+options3, [job_id])
-        assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
-        assert_cmd_gives_ids("dx find analyses "+options3, [])
+        self.assert_cmd_gives_ids("dx find executions "+options3, [job_id])
+        self.assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
+        self.assert_cmd_gives_ids("dx find analyses "+options3, [])
 
         # Search by property (presence and by value)
         options3 = options2 + " --property foo"
-        assert_cmd_gives_ids("dx find executions "+options3, [analysis_id, job_id])
-        assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
-        assert_cmd_gives_ids("dx find analyses "+options3, [analysis_id])
+        self.assert_cmd_gives_ids("dx find executions "+options3, [analysis_id, job_id])
+        self.assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
+        self.assert_cmd_gives_ids("dx find analyses "+options3, [analysis_id])
         options3 = options2 + " --property foo=baz"
-        assert_cmd_gives_ids("dx find executions "+options3, [job_id])
-        assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
-        assert_cmd_gives_ids("dx find analyses "+options3, [])
+        self.assert_cmd_gives_ids("dx find executions "+options3, [job_id])
+        self.assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
+        self.assert_cmd_gives_ids("dx find analyses "+options3, [])
+
+    @unittest.skipUnless(testutil.TEST_RUN_JOBS,
+                         'skipping test that would run a job')
+    def test_find_analyses_run_by_jobs(self):
+        project_name = "tempProject+{t}".format(t=time.time())
+        with temporary_project(name=project_name) as temp_proj:
+            temp_proj_id = temp_proj.get_id()
+            dxsubapplet = dxpy.DXApplet(project=temp_proj_id)
+            dxapplet = dxpy.DXApplet(project=temp_proj_id)
+
+            dxsubapplet.new(name="sub_applet",
+                            dxapi="1.0.0",
+                            inputSpec=[],
+                            outputSpec=[],
+                            runSpec={"code": "sleep 1200",
+                                     "interpreter": "bash",
+                                     "execDepends": [{"name": "dx-toolkit"}]},
+                            project=temp_proj_id)
+
+            dxworkflow = dxpy.new_dxworkflow(name='test_workflow', project=temp_proj_id)
+            dxworkflow.add_stage(dxsubapplet, stage_input={})
+
+            dxapplet.new(name="workflow_runner",
+                         dxapi="1.0.0",
+                         inputSpec=[],
+                         outputSpec=[],
+                         runSpec={"code": "dx run " + dxworkflow.get_id() + " --project " + temp_proj_id,
+                                  "interpreter": "bash",
+                                  "execDepends": [{"name": "dx-toolkit"}]},
+                         project=temp_proj_id)
+
+            job_id = dxapplet.run(applet_input={}, project=temp_proj_id).get_id()
+            workflow_id = dxworkflow.get_id()
+            jobapplet_id = dxapplet.get_id()
+
+            cd("{project_id}:/".format(project_id=dxapplet.get_proj_id()))
+
+            # Wait for analysis to be created
+            t = 0
+            while True:
+                try:
+                    analysis_id = dxpy.api.job_describe(job_id, {})['dependsOn'][0]
+                    break
+                except IndexError:
+                    t += 1
+                    if t > 300:
+                        raise Exception("Timeout while waiting for workflow to be run by root execution")
+                    time.sleep(1)
+
+            # Wait for subjob to be run by analysis
+            subjob_id = dxpy.api.analysis_describe(analysis_id, {})['stages'][0]['execution']['id']
+            t = 0
+            while True:
+                try:
+                    dxpy.api.job_describe(subjob_id, {})
+                    break
+                except DXAPIError:
+                    t += 1
+                    if t > 20:
+                        raise Exception("Timeout while waiting for job to be created for an analysis stage")
+                    time.sleep(1)
+
+            options = "--brief --user=self --project="+temp_proj_id
+            self.assert_cmd_gives_ids("dx find executions "+options, [job_id, analysis_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options, [analysis_id])
+            options2 = options + " --applet="+workflow_id
+            self.assert_cmd_gives_ids("dx find executions "+options2, [job_id, analysis_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [analysis_id])
+            options2 = options + " --applet="+jobapplet_id
+            self.assert_cmd_gives_ids("dx find executions "+options2, [job_id, analysis_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [job_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [])
+            options2 = options + " -n 9000"
+            self.assert_cmd_gives_ids("dx find executions "+options2, [job_id, analysis_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [analysis_id])
+            options3 = options2 + " --origin="+job_id
+            self.assert_cmd_gives_ids("dx find executions "+options3, [job_id, analysis_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options3, [job_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options3, [analysis_id])
+            options2 = options + " --origin-jobs"
+            self.assert_cmd_gives_ids("dx find executions "+options2, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [])
+            options2 = options + " --origin-jobs -n 9000"
+            self.assert_cmd_gives_ids("dx find executions "+options2, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [])
+            options2 = options + " --all-jobs"
+            self.assert_cmd_gives_ids("dx find executions "+options2, [job_id, analysis_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [job_id, subjob_id])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [analysis_id])
+            options2 = options + " --state=done"
+            self.assert_cmd_gives_ids("dx find executions "+options2, [])
+            self.assert_cmd_gives_ids("dx find jobs "+options2, [])
+            self.assert_cmd_gives_ids("dx find analyses "+options2, [])
 
     @unittest.skipUnless(testutil.TEST_ISOLATED_ENV,
                          'skipping test that requires presence of test org')
@@ -7656,6 +7739,7 @@ class TestDXGetExecutables(DXTestCaseBuildApps):
         self._test_get_app("get_app_open_source_published_no_authusers", True, True, [])
         self._test_get_app("get_app_published_no_authusers", False, True, [])
 
+    @unittest.skipUnless(testutil.TEST_ISOLATED_ENV, 'skipping test that would create apps')
     def test_get_app_by_name(self):
         [app_id, output_app_spec] = self.make_app("cool_app_name", False, False, [])
 
