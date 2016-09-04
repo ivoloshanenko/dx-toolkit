@@ -176,6 +176,7 @@ class TestDXFSMountAll(unittest.TestCase):
     def test_dxfs_file_operations(self):
         """Test basic operations like create, rename, copy, remove"""
         path = os.path.join(self.mountpoint, self._get_root_folder(self.project_id))
+
         # Create via DX
         dxpy.upload_local_file(__file__, wait_on_close=True)
         time.sleep(10)

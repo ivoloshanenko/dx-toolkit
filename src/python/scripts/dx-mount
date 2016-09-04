@@ -202,7 +202,6 @@ class DXFS(LoggingMixIn, Operations):
         self.initialized_once = threading.Event()
         self.projects = []
 
-
     def wait_until_initialized(self):
         # Run a less expensive check that doesn't need to acquire a
         # lock, so we can possibly short-circuit the real wait() call,
@@ -352,10 +351,10 @@ class DXFS(LoggingMixIn, Operations):
         return re.sub(pattern, '', path) or '/'
 
     def _get_unique_file_name(self, path, dxid):
-        """This method checks if other file exist with same name, then add suffix as '.<id>'"""
+        """This method checks if other file or directory exist with same name, then add suffix as '.<id>'"""
         logger.debug('generating unique filename for {}'.format(path.encode('utf-8')))
         if dxid in os.path.basename(path).split('.'):
-            original_name = os.path.basename(path).split('.')[0]
+            original_name = os.path.basename(path).rstrip('.' + dxid)
         else:
             original_name = os.path.basename(path)
         dx_path = self._get_path_without_project_name(path)
@@ -363,18 +362,19 @@ class DXFS(LoggingMixIn, Operations):
         folder = os.path.dirname(dx_path)
         objects = project.project.list_folder(folder=folder, describe={'fields': {'id': True, 'name': True, 'class': True}})
         files = [x['describe']['name'] for x in objects['objects'] if x['describe']['class'] == 'file']
-        if files.count(original_name) > 1:
+        files_and_dirs = files + [x.strip('/') for x in objects['folders']]
+        if files_and_dirs.count(original_name) > 1:
             return original_name + '.' + dxid
         else:
             return original_name
 
     def refresh(self):
         # Refresh project list in case if all mounted
-        logger.debug('Refreshing filesystem')
         if self.mount_all:
             all_projects = list(dxpy.find_projects(describe=True))
             for pr in all_projects:
                 if pr['id'] not in [x.id for x in self.projects]:
+                    logger.debug('New {} project discovered'.format(pr['id']))
                     self.projects += [Project(project=dxpy.DXProject(pr['id']), id=pr['id'],
                                               description=pr['describe'], mtime=pr['describe']['modified'])]
                     self._populate(next(x for x in self.projects if x.id == pr['id']))
@@ -391,13 +391,13 @@ class DXFS(LoggingMixIn, Operations):
 
 
         # Populate content for modified projects
+        logger.debug('Refreshing filesystem')
         for project in self.projects:
             new_mtime = project.project.describe(input_params={"fields": {"modified": True}})['modified']
-
             if project.mtime < new_mtime:
-                logger.debug("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
-                                                                                  t1=project.mtime, t2=new_mtime))
-                self._populate(project)
+                    logger.debug("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
+                                                                                      t1=project.mtime, t2=new_mtime))
+                    self._populate(project)
 
         threading.Timer(self.refresh_interval, self.refresh).start()
 
@@ -446,6 +446,7 @@ class DXFS(LoggingMixIn, Operations):
 
         project = self._get_project_from_path(path)
 
+        self.allow_fs_refresh = False
         if dxid is None:
             files = list((v.describe['name'] for k, v in parent.child_nodes.iteritems() if v.type == 'file'))
             if os.path.basename(path) in files:
@@ -453,7 +454,7 @@ class DXFS(LoggingMixIn, Operations):
                 raise FuseOSError(EPERM)
 
             f = dxpy.new_dxfile(name=filename, project=project.description['id'],
-                                folder=self._get_path_without_project_name(dirname))
+                                    folder=self._get_path_without_project_name(dirname))
             dxid = f.get_id()
             describe = f.describe()
         unique_name = self._get_unique_file_name(path, dxid)
@@ -489,7 +490,10 @@ class DXFS(LoggingMixIn, Operations):
         if not node:
             raise FuseOSError(ENOENT)
         elif node.describe is None or node.handler is None:
-            raise FuseOSError(ENOENT)
+            if node.type == 'file':
+                raise FuseOSError(ENOENT)
+            else:
+                return ''
 
         # The following attributes are "mutable" and need to be fetched
         # anew each time. This whitelist is most useful for allowing
