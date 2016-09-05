@@ -193,6 +193,7 @@ class TestDXFSMountAll(unittest.TestCase):
         self.assertIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', self.project_id]).split())
 
         # Remove via FS
+        time.sleep(10)
         os.remove(os.path.join(path, os.path.basename(__file__)))
         self.assertNotIn(os.path.basename(__file__), subprocess.check_output(['dx', 'ls', self.project_id]).split())
 

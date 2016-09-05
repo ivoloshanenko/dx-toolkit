@@ -169,19 +169,22 @@ class DXInode(object):
 
     def write(self, offset, data):
         if self.dxid and self.dxid.startswith('file'):
-            # TODO: write seek, overwrite, append?
+            # TODO: write seek (now writing can only append data, DXFile limitation?)
             if self.handler.closed():
-                logger.error('File closed! Writing not supported')
-                #raise NotImplementedError('File closed! Writing not supported')
+                logger.error('File closed! Writing not permitted')
+                raise FuseOSError(EPERM)
             else:
                 self.handler.write(data)
-                self.handler.close()
         else:
-            raise NotImplementedError()
+            raise FuseOSError(ENOSYS)
 
         # TODO: update size of self
         self.now()
         return len(data)
+
+    def close(self):
+        if not self.handler.closed():
+            self.handler.close()
 
     def truncate(self, length):
         logger.debug("Truncating {}".format(self.name.encode('utf-8')))
@@ -395,7 +398,7 @@ class DXFS(LoggingMixIn, Operations):
         for project in self.projects:
             new_mtime = project.project.describe(input_params={"fields": {"modified": True}})['modified']
             if project.mtime < new_mtime:
-                    logger.debug("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
+                    logger.info("Project {id} was modified ({t1} < {t2}), reloading".format(id=project.description['id'],
                                                                                       t1=project.mtime, t2=new_mtime))
                     self._populate(project)
 
@@ -471,6 +474,11 @@ class DXFS(LoggingMixIn, Operations):
 
         self.fd += 1
         return self.fd
+
+    def flush(self, path, fh):
+        logger.debug('Closing file {}'.format(path))
+        node = self._node(path)
+        node.close()
 
     def getattr(self, path, fh=None):
         self.wait_until_initialized()
